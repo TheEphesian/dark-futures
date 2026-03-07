@@ -1,0 +1,4 @@
+textual>=0.80.0
+textual-web>=0.8.0
+numpy>=1.26.0
+pyOpenSSL>=24.0.0
