@@ -6,6 +6,34 @@ if TYPE_CHECKING:
     from ..game.country import Country
 
 
+# Resource costs per operation
+INTEL_COSTS = {
+    "satellite_recon": {"fuel": 2},
+    "deploy_agent": {"fuel": 5, "gdp": 0.01},
+    "cyber_hack": {"fuel": 3},
+}
+
+
+def _check_resources(country: "Country", costs: Dict) -> Tuple[bool, str]:
+    """Check if country has enough resources. Returns (ok, error_msg)."""
+    for resource, amount in costs.items():
+        current = getattr(country, resource, 0)
+        if isinstance(current, float):
+            if current < amount:
+                return False, f"Insufficient {resource}: have {current:.2f}, need {amount}"
+        else:
+            if current < amount:
+                return False, f"Insufficient {resource}: have {current}, need {amount}"
+    return True, "ok"
+
+
+def _deduct_resources(country: "Country", costs: Dict):
+    """Deduct resource costs from country."""
+    for resource, amount in costs.items():
+        current = getattr(country, resource, 0)
+        setattr(country, resource, max(0, current - amount) if isinstance(current, int) else max(0.0, current - amount))
+
+
 class IntelSystem:
     """Handles intelligence gathering operations"""
 
@@ -13,10 +41,11 @@ class IntelSystem:
         self.state = game_state
 
     def satellite_recon(self, country: "Country", region: str) -> Tuple[bool, Dict]:
-        """
-        Satellite reconnaissance of region.
-        Returns: (success, intel_data)
-        """
+        """Satellite reconnaissance of region. Costs: 2 fuel."""
+        ok, msg = _check_resources(country, INTEL_COSTS["satellite_recon"])
+        if not ok:
+            return False, {"error": msg}
+
         rng = self.state.rng
 
         base_chance = country.intel_coverage / 100
@@ -24,6 +53,9 @@ class IntelSystem:
         success_chance = float(np.clip(base_chance - weather_penalty, 0.1, 0.95))
 
         success = rng.random() < success_chance
+
+        # Always pay the cost
+        _deduct_resources(country, INTEL_COSTS["satellite_recon"])
 
         if success:
             accuracy = float(rng.uniform(0.6, 0.95) * (country.intel_coverage / 100))
@@ -34,24 +66,24 @@ class IntelSystem:
                 "accuracy": accuracy,
                 "timestamp": self.state.turn,
             }
-            country.fuel = max(0, country.fuel - 2)
             self.state.log_event(
                 f"{country.name}: Satellite recon of {region} successful (acc: {accuracy:.0%})",
                 "info",
             )
             return True, intel
         else:
-            country.fuel = max(0, country.fuel - 1)
             self.state.log_event(
                 f"{country.name}: Satellite recon of {region} failed", "warning"
             )
             return False, {}
 
     def deploy_agent(self, country: "Country", target_country: str) -> Tuple[bool, str]:
-        """
-        Deploy human intelligence asset.
-        Returns: (success, result_msg)
-        """
+        """Deploy human intelligence asset. Costs: 5 fuel, 0.01 GDP."""
+        ok, msg = _check_resources(country, INTEL_COSTS["deploy_agent"])
+        if not ok:
+            return False, msg
+
+        _deduct_resources(country, INTEL_COSTS["deploy_agent"])
         rng = self.state.rng
 
         detection_chance = 0.3
@@ -81,49 +113,54 @@ class IntelSystem:
     def cyber_hack(
         self, country: "Country", target: str, objective: str
     ) -> Tuple[bool, Dict]:
-        """
-        Cyber operation against enemy systems.
-        Returns: (success, result)
-        """
+        """Cyber operation. Costs: 3 fuel. objective: intelligence | sabotage | disruption"""
+        ok, msg = _check_resources(country, INTEL_COSTS["cyber_hack"])
+        if not ok:
+            return False, {"error": msg}
+
+        _deduct_resources(country, INTEL_COSTS["cyber_hack"])
         rng = self.state.rng
 
+        base_chance = country.cyber_strength / 100
         target_country = self.state.countries.get(target)
-        if not target_country:
-            return False, {"error": "Invalid target"}
+        defense = (target_country.cyber_strength / 100) if target_country else 0.5
 
-        strength_diff = country.cyber_strength - target_country.cyber_strength
-        base_chance = 0.5 + (strength_diff / 200)
-        success_chance = float(np.clip(base_chance, 0.1, 0.8))
-
+        success_chance = float(np.clip(base_chance - defense * 0.5, 0.1, 0.85))
         success = rng.random() < success_chance
-        traced = rng.random() < (0.5 if success else 0.8)
+        detected = rng.random() < 0.4
 
-        result: Dict = {"success": success, "traced": traced, "objective": objective}
+        result = {"objective": objective, "success": success, "detected": detected}
 
         if success:
-            if objective == "steal_intel":
-                result["data"] = f"Classified {target} intelligence"
-            elif objective == "sabotage":
-                damage = int(rng.integers(5, 15))
+            if objective == "intelligence":
+                result["data"] = rng.choice(
+                    [
+                        "military deployment plans",
+                        "nuclear launch codes (partial)",
+                        "diplomatic communications",
+                    ]
+                )
+            elif objective == "sabotage" and target_country:
+                damage = int(rng.integers(5, 20))
                 target_country.infrastructure = max(
                     0, target_country.infrastructure - damage
                 )
-                result["damage"] = f"Infrastructure damaged by {damage} points"
-            self.state.log_event(
-                f"{country.name}: Cyber op vs {target} succeeded", "info"
-            )
-        else:
-            self.state.log_event(
-                f"{country.name}: Cyber op vs {target} failed", "warning"
-            )
+                result["damage"] = damage
+            elif objective == "disruption" and target_country:
+                target_country.cyber_strength = max(
+                    0, target_country.cyber_strength - int(rng.integers(5, 15))
+                )
 
-        if traced:
+        if detected:
             self.state.global_tension = min(
-                100.0, self.state.global_tension + float(rng.uniform(10, 25))
-            )
-            self.state.log_event(
-                f"{target} traced cyber attack to {country.name}!", "critical"
+                100.0, self.state.global_tension + float(rng.uniform(5, 15))
             )
 
-        country.morale = max(0, country.morale - 2)
+        severity = "info" if success else "warning"
+        self.state.log_event(
+            f"{country.name}: Cyber {objective} vs {target} - {'SUCCESS' if success else 'FAILED'}"
+            + (f" [DETECTED]" if detected else ""),
+            severity,
+        )
+
         return success, result
