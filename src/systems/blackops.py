@@ -6,6 +6,31 @@ if TYPE_CHECKING:
     from ..game.country import Country
 
 
+# Resource costs per operation
+BLACKOPS_COSTS = {
+    "assassinate": {"fuel": 8, "gdp": 0.02},
+    "sabotage": {"fuel": 5, "munitions": 5},
+    "false_flag": {"fuel": 10, "gdp": 0.03},
+}
+
+
+def _check_resources(country: "Country", costs: Dict) -> tuple:
+    for resource, amount in costs.items():
+        current = getattr(country, resource, 0)
+        if current < amount:
+            return False, f"Insufficient {resource}: have {current}, need {amount}"
+    return True, "ok"
+
+
+def _deduct_resources(country: "Country", costs: Dict):
+    for resource, amount in costs.items():
+        current = getattr(country, resource, 0)
+        if isinstance(current, float):
+            setattr(country, resource, max(0.0, current - amount))
+        else:
+            setattr(country, resource, max(0, current - amount))
+
+
 class BlackOpsSystem:
     """Covert operations"""
 
@@ -15,10 +40,14 @@ class BlackOpsSystem:
     def assassinate(
         self, country: "Country", target_country: str, target_type: str
     ) -> Dict:
-        """
-        Assassination attempt.
+        """Assassination attempt. Costs: 8 fuel, 0.02 GDP.
         target_type: military_leader | political_leader | scientist
         """
+        ok, msg = _check_resources(country, BLACKOPS_COSTS["assassinate"])
+        if not ok:
+            return {"success": False, "reason": msg}
+
+        _deduct_resources(country, BLACKOPS_COSTS["assassinate"])
         rng = self.state.rng
 
         base_chances = {
@@ -84,106 +113,129 @@ class BlackOpsSystem:
             if self.state.defcon > 2:
                 self.state.defcon -= 1
             self.state.log_event(
-                f"{target_country} attributes assassination to {country.name}!",
+                f"{country.name} ATTRIBUTED to assassination attempt on {target_country}",
                 "critical",
             )
 
-        country.morale = max(0, country.morale - 5)
         return result
 
-    def sabotage_facility(
-        self, country: "Country", target_country: str, facility_type: str
+    def sabotage(
+        self, country: "Country", target_country: str, sabotage_target: str
     ) -> Dict:
+        """Sabotage operation. Costs: 5 fuel, 5 munitions.
+        sabotage_target: infrastructure | military | nuclear | communications
         """
-        Sabotage enemy facility.
-        facility_type: factory | power_plant | port | command_center
-        """
+        ok, msg = _check_resources(country, BLACKOPS_COSTS["sabotage"])
+        if not ok:
+            return {"success": False, "reason": msg}
+
+        _deduct_resources(country, BLACKOPS_COSTS["sabotage"])
         rng = self.state.rng
 
-        success_chance = float(
-            np.clip(0.5 + (country.agents_active * 0.08), 0.2, 0.75)
-        )
+        target = self.state.countries.get(target_country)
+        if not target:
+            return {"success": False, "reason": "Invalid target"}
+
+        base_chance = 0.4 + (country.agents_active * 0.05)
+        success_chance = float(np.clip(base_chance, 0.15, 0.7))
         success = rng.random() < success_chance
-        traced = rng.random() < 0.6
+        detected = rng.random() < 0.35
 
         result: Dict = {
             "success": success,
-            "facility_type": facility_type,
-            "traced": traced,
+            "sabotage_target": sabotage_target,
+            "detected": detected,
         }
 
-        target = self.state.countries.get(target_country)
-        if success and target:
-            damage = float(rng.uniform(0.2, 0.4))
-            if facility_type == "factory":
-                target.munitions = max(0, int(target.munitions * (1 - damage)))
-                result["impact"] = f"Production reduced {damage:.0%}"
-            elif facility_type == "power_plant":
-                target.infrastructure = max(
-                    0, target.infrastructure - int(100 * damage)
-                )
-                result["impact"] = "Power grid damaged"
-            elif facility_type == "port":
-                target.fuel = max(0, int(target.fuel * (1 - damage)))
-                result["impact"] = "Supply chain disrupted"
-            elif facility_type == "command_center":
+        if success:
+            if sabotage_target == "infrastructure":
+                dmg = int(rng.integers(10, 25))
+                target.infrastructure = max(0, target.infrastructure - dmg)
+                result["damage"] = dmg
+            elif sabotage_target == "military":
+                target.munitions = max(0, target.munitions - int(rng.integers(5, 15)))
+                target.fuel = max(0, target.fuel - int(rng.integers(5, 15)))
+                result["impact"] = "Military supplies damaged"
+            elif sabotage_target == "nuclear":
+                target.warheads = max(0, target.warheads - int(rng.integers(1, 5)))
+                result["impact"] = "Nuclear warheads compromised"
+            elif sabotage_target == "communications":
                 target.cyber_strength = max(
-                    0, int(target.cyber_strength * (1 - damage))
+                    0, target.cyber_strength - int(rng.integers(10, 25))
                 )
-                result["impact"] = "C2 capabilities degraded"
+                result["impact"] = "Communications disrupted"
 
             self.state.log_event(
-                f"Sabotage of {target_country} {facility_type} successful", "warning"
+                f"Sabotage of {target_country} {sabotage_target} SUCCESSFUL",
+                "warning",
             )
         else:
             self.state.log_event(
-                f"Sabotage attempt on {target_country} {facility_type} failed", "info"
+                f"Sabotage attempt on {target_country} {sabotage_target} FAILED",
+                "info",
             )
 
-        if traced:
+        if detected:
             self.state.global_tension = min(
                 100.0,
-                self.state.global_tension + float(rng.uniform(15, 30)),
+                self.state.global_tension + float(rng.uniform(10, 25)),
             )
             self.state.log_event(
-                f"{target_country} traced sabotage to {country.name}", "critical"
+                f"Sabotage operation on {target_country} was DETECTED", "critical"
             )
 
         return result
 
     def false_flag(
-        self, country: "Country", target: str, blamed: str
+        self, country: "Country", target_country: str, blamed_country: str
     ) -> Dict:
-        """False flag operation: attack target, frame another country."""
+        """False flag operation. Costs: 10 fuel, 0.03 GDP."""
+        ok, msg = _check_resources(country, BLACKOPS_COSTS["false_flag"])
+        if not ok:
+            return {"success": False, "reason": msg}
+
+        _deduct_resources(country, BLACKOPS_COSTS["false_flag"])
         rng = self.state.rng
 
-        sophistication = country.cyber_strength + (country.agents_active * 5)
-        success_chance = float(np.clip(sophistication / 150, 0.2, 0.7))
+        target = self.state.countries.get(target_country)
+        blamed = self.state.countries.get(blamed_country)
+
+        if not target or not blamed:
+            return {"success": False, "reason": "Invalid target or blamed country"}
+
+        success_chance = float(np.clip(0.35 + country.agents_active * 0.05, 0.15, 0.6))
         success = rng.random() < success_chance
+        discovered = rng.random() < 0.25
 
-        result: Dict = {"success": success}
+        result: Dict = {
+            "success": success,
+            "target": target_country,
+            "blamed": blamed_country,
+            "discovered": discovered,
+        }
 
-        if success:
+        if success and not discovered:
             self.state.global_tension = min(
-                100.0,
-                self.state.global_tension + float(rng.uniform(25, 50)),
+                100.0, self.state.global_tension + float(rng.uniform(15, 30))
             )
-            if float(rng.random()) < 0.3:
-                result["alliance_break"] = f"{target} breaks ties with {blamed}"
+            if blamed:
+                blamed.morale = max(0, blamed.morale - int(rng.integers(5, 15)))
+            result["impact"] = f"{target_country} blames {blamed_country}"
             self.state.log_event(
-                f"False flag: {target} believes {blamed} attacked them", "critical"
+                f"False flag: {target_country} now blames {blamed_country}",
+                "warning",
             )
-        else:
+        elif discovered:
             self.state.global_tension = min(
-                100.0,
-                self.state.global_tension + float(rng.uniform(40, 60)),
+                100.0, self.state.global_tension + float(rng.uniform(20, 40))
             )
-            if self.state.defcon > 1:
-                self.state.defcon -= 1
+            country.morale = max(0, country.morale - int(rng.integers(10, 20)))
+            result["impact"] = "Operation discovered - diplomatic backlash"
             self.state.log_event(
-                f"False flag EXPOSED! {target} and {blamed} identify {country.name}",
+                f"False flag by {country.name} DISCOVERED - international condemnation",
                 "critical",
             )
+        else:
+            self.state.log_event("False flag operation FAILED", "info")
 
-        country.morale = max(0, country.morale - 10)
         return result
