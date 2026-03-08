@@ -9,8 +9,7 @@ from .security import generate_self_signed_cert, create_ssl_context
 
 
 class MCPServer:
-    """
-    Secure local MCP server for AI agents.
+    """Secure local MCP server for AI agents.
     Listens on 127.0.0.1:8443 with TLS.
     Protocol: newline-delimited JSON-RPC 2.0.
     """
@@ -80,16 +79,24 @@ class MCPServer:
         try:
             if method == "get_state":
                 result = self.tools.get_state()
+            elif method == "get_game_status":
+                result = self.tools.get_game_status()
             elif method == "submit_action":
                 result = self.tools.submit_action(
                     params.get("action"),
                     params.get("targets", []),
                     params.get("parameters", {}),
                 )
-            elif method == "request_advice":
-                result = self.tools.request_advice(params.get("phase", "intel"))
-            elif method == "list_tools":
-                result = self.tools.list_tools()
+            elif method == "request_briefing":
+                result = self.tools.request_briefing()
+            elif method == "advance_phase":
+                result = self.tools.advance_phase()
+            elif method == "end_turn":
+                result = self.tools.end_turn()
+            elif method == "get_ai_status":
+                result = self.tools.get_ai_status(params.get("country_code", ""))
+            elif method == "get_all_ai_status":
+                result = self.tools.get_all_ai_status()
             else:
                 return {
                     "jsonrpc": "2.0",
@@ -106,21 +113,17 @@ class MCPServer:
             return {
                 "jsonrpc": "2.0",
                 "id": request_id,
-                "error": {"code": -32603, "message": str(e)},
+                "error": {"code": -32603, "message": f"Internal error: {e}"},
             }
 
     async def start(self):
-        """Start the MCP server and serve forever"""
-        server = await asyncio.start_server(
+        """Start the MCP server"""
+        server = await asyncio.start_tls_server(
             self.handle_client,
             self.host,
             self.port,
             ssl=self.ssl_context,
         )
-
-        addr = server.sockets[0].getsockname()
-        print(f"MCP Server running on https://{addr[0]}:{addr[1]}")
-        print("AI agents connect via: wss://localhost:8443")
-
+        print(f"MCP server listening on {self.host}:{self.port} (TLS)")
         async with server:
             await server.serve_forever()
