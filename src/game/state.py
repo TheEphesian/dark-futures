@@ -1,6 +1,9 @@
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
 import numpy as np
+
+if TYPE_CHECKING:
+    from ..ai.controller import AIController
 
 
 @dataclass
@@ -20,6 +23,10 @@ class GameState:
     defcon: int = 5  # 5 = peace, 1 = nuclear war
     global_tension: float = 0.0  # 0-100
 
+    # AI configuration
+    ai_difficulty: str = "normal"  # easy, normal, hard
+    _ai_controller: Optional[object] = field(default=None, repr=False)
+
     # Event log
     events: List[Dict] = field(default_factory=list)
 
@@ -31,10 +38,46 @@ class GameState:
         self.rng = np.random.default_rng(self.seed)
 
     def advance_turn(self):
-        """Progress to next turn"""
+        """Progress to next turn, then process AI turns."""
         self.turn += 1
         self.phase = "intel"
         self.global_tension = float(np.clip(self.global_tension - 2, 0, 100))
+        
+        # Process AI country turns after player's turn resolves
+        self.process_ai_turns()
+
+    def process_ai_turns(self) -> Dict[str, List]:
+        """Run AI turns for all NPC countries.
+        
+        Creates or reuses an AIController instance, then executes
+        assess -> plan -> execute for each AI country.
+        
+        Returns:
+            Dict mapping country codes to their action results.
+        """
+        if not self.ai_countries:
+            return {}
+        
+        from ..ai.controller import AIController
+        
+        if self._ai_controller is None:
+            self._ai_controller = AIController(self, difficulty=self.ai_difficulty)
+        
+        results = self._ai_controller.process_all_ai_turns()
+        
+        self.log_event(
+            f"AI turns processed: {', '.join(f'{k}({len(v)} actions)' for k, v in results.items())}",
+            "info",
+        )
+        
+        return results
+
+    def get_ai_controller(self) -> "AIController":
+        """Get or create the AI controller instance."""
+        if self._ai_controller is None:
+            from ..ai.controller import AIController
+            self._ai_controller = AIController(self, difficulty=self.ai_difficulty)
+        return self._ai_controller
 
     def log_event(self, event: str, severity: str = "info"):
         """Add event to log"""
@@ -48,6 +91,7 @@ class GameState:
             "turn": self.turn,
             "phase": self.phase,
             "player_country": self.player_country,
+            "ai_difficulty": self.ai_difficulty,
             "defcon": self.defcon,
             "global_tension": self.global_tension,
             "countries": {k: v.to_dict() for k, v in self.countries.items()},
