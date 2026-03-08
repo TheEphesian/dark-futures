@@ -38,38 +38,43 @@ class GameState:
         self.rng = np.random.default_rng(self.seed)
 
     def advance_turn(self):
-        """Progress to next turn, then process AI turns."""
+        """Progress to next turn, then process AI turns.
+
+        NOTE: In MVP mode with GameEngine, the engine manages phase transitions
+        and calls process_ai_turns() directly. This method is kept for backward
+        compatibility with direct state manipulation.
+        """
         self.turn += 1
         self.phase = "intel"
         self.global_tension = float(np.clip(self.global_tension - 2, 0, 100))
-        
-        # Process AI country turns after player's turn resolves
+
+        # Fire events and resource ticks
+        from .events import trigger_random_events
+        from .resources import apply_resource_tick
+        trigger_random_events(self)
+        for country in self.countries.values():
+            apply_resource_tick(country)
+
+        # Process AI country turns
         self.process_ai_turns()
 
     def process_ai_turns(self) -> Dict[str, List]:
-        """Run AI turns for all NPC countries.
-        
-        Creates or reuses an AIController instance, then executes
-        assess -> plan -> execute for each AI country.
-        
-        Returns:
-            Dict mapping country codes to their action results.
-        """
+        """Run AI turns for all NPC countries."""
         if not self.ai_countries:
             return {}
-        
+
         from ..ai.controller import AIController
-        
+
         if self._ai_controller is None:
             self._ai_controller = AIController(self, difficulty=self.ai_difficulty)
-        
+
         results = self._ai_controller.process_all_ai_turns()
-        
+
         self.log_event(
             f"AI turns processed: {', '.join(f'{k}({len(v)} actions)' for k, v in results.items())}",
             "info",
         )
-        
+
         return results
 
     def get_ai_controller(self) -> "AIController":
@@ -78,6 +83,20 @@ class GameState:
             from ..ai.controller import AIController
             self._ai_controller = AIController(self, difficulty=self.ai_difficulty)
         return self._ai_controller
+
+    def validate_action(self, action: str) -> tuple:
+        """Check if action is valid in current phase.
+
+        Returns (is_valid: bool, message: str).
+        """
+        from .engine import PHASE_ACTIONS
+        allowed = PHASE_ACTIONS.get(self.phase, [])
+        if action not in allowed:
+            return False, (
+                f"Action '{action}' not allowed in {self.phase} phase. "
+                f"Allowed: {allowed}"
+            )
+        return True, "ok"
 
     def log_event(self, event: str, severity: str = "info"):
         """Add event to log"""
@@ -91,9 +110,14 @@ class GameState:
             "turn": self.turn,
             "phase": self.phase,
             "player_country": self.player_country,
-            "ai_difficulty": self.ai_difficulty,
+            "ai_countries": self.ai_countries,
             "defcon": self.defcon,
             "global_tension": self.global_tension,
-            "countries": {k: v.to_dict() for k, v in self.countries.items()},
-            "events": self.events[-50:],
+            "countries": {
+                code: c.to_dict() if hasattr(c, "to_dict") else (
+                    c.__dict__ if hasattr(c, "__dict__") else str(c)
+                )
+                for code, c in self.countries.items()
+            },
+            "events": self.events[-20:],
         }
